@@ -6,15 +6,16 @@ const pool = require('./db');
 
 const app = express();
 
+// Middleware de CORS
 app.use(cors({
     origin: '*',
     methods: ['GET', 'POST', 'PUT', 'DELETE'],
     allowedHeaders: ['Content-Type', 'Authorization']
 }));
 
-// Límite de tamaño para recibir imágenes en Base64
-app.use(express.json({ limit: '10mb' }));
-app.use(express.urlencoded({ limit: '10mb', extended: true }));
+// Límite de tamaño incrementado a 50mb para recibir fotos en Base64 de alta resolución
+app.use(express.json({ limit: '50mb' }));
+app.use(express.urlencoded({ limit: '50mb', extended: true }));
 app.use('/uploads', express.static('uploads'));
 
 // ==========================================
@@ -24,6 +25,11 @@ app.use('/uploads', express.static('uploads'));
 // Login
 app.post('/api/login', async (req, res) => {
     const { email, password } = req.body;
+
+    if (!email || !password) {
+        return res.status(400).json({ success: false, message: 'Debes proporcionar email y contraseña' });
+    }
+
     try {
         const result = await pool.query('SELECT * FROM usuarios WHERE email = $1', [email]);
         if (result.rows.length === 0) {
@@ -56,6 +62,11 @@ app.post('/api/login', async (req, res) => {
 // Registro
 app.post('/api/registro', async (req, res) => {
     const { nombre, email, password, rol } = req.body;
+
+    if (!nombre || !email || !password) {
+        return res.status(400).json({ success: false, message: 'Nombre, email y contraseña son obligatorios' });
+    }
+
     try {
         const hashedPassword = await bcrypt.hash(password, 10);
         const query = 'INSERT INTO usuarios (nombre, email, password, rol) VALUES ($1, $2, $3, $4) RETURNING id';
@@ -96,18 +107,20 @@ app.get('/api/productos', async (req, res) => {
         res.json(result.rows);
     } catch (err) {
         console.error('Error en GET /api/productos:', err);
-        res.status(500).json({ message: err.message });
+        res.status(500).json({ success: false, message: err.message });
     }
 });
 
 app.post('/api/productos', async (req, res) => {
     const { nombre, descripcion, precio, stock, categoria_id, categoriaId, imagen_url, imagenUrl } = req.body;
-    const catId = categoria_id || categoriaId || 1;
+    const catId = parseInt(categoria_id || categoriaId, 10) || 1;
     const imgUrl = imagen_url || imagenUrl || 'https://via.placeholder.com/150';
+    const precioNum = parseFloat(precio) || 0.0;
+    const stockNum = parseInt(stock, 10) || 0;
 
     try {
         const query = 'INSERT INTO productos (nombre, descripcion, precio, stock, categoria_id, imagen_url) VALUES ($1, $2, $3, $4, $5, $6) RETURNING id';
-        const result = await pool.query(query, [nombre, descripcion, precio, stock, catId, imgUrl]);
+        const result = await pool.query(query, [nombre, descripcion, precioNum, stockNum, catId, imgUrl]);
         res.json({ success: true, message: 'Producto creado exitosamente', id: result.rows[0].id });
     } catch (err) {
         console.error('Error en POST /api/productos:', err);
@@ -118,12 +131,14 @@ app.post('/api/productos', async (req, res) => {
 app.put('/api/productos/:id', async (req, res) => {
     const { id } = req.params;
     const { nombre, descripcion, precio, stock, categoria_id, categoriaId, imagen_url, imagenUrl } = req.body;
-    const catId = categoria_id || categoriaId || 1;
+    const catId = parseInt(categoria_id || categoriaId, 10) || 1;
     const imgUrl = imagen_url || imagenUrl || 'https://via.placeholder.com/150';
+    const precioNum = parseFloat(precio) || 0.0;
+    const stockNum = parseInt(stock, 10) || 0;
 
     try {
         const query = 'UPDATE productos SET nombre = $1, descripcion = $2, precio = $3, stock = $4, categoria_id = $5, imagen_url = $6 WHERE id = $7';
-        await pool.query(query, [nombre, descripcion, precio, stock, catId, imgUrl, id]);
+        await pool.query(query, [nombre, descripcion, precioNum, stockNum, catId, imgUrl, id]);
         res.json({ success: true, message: 'Producto actualizado' });
     } catch (err) {
         console.error('Error en PUT /api/productos:', err);
@@ -148,7 +163,7 @@ app.get('/api/categorias', async (req, res) => {
         res.json(result.rows);
     } catch (err) {
         console.error('Error en GET /api/categorias:', err);
-        res.status(500).json({ message: err.message });
+        res.status(500).json({ success: false, message: err.message });
     }
 });
 
@@ -159,12 +174,17 @@ app.get('/api/categorias', async (req, res) => {
 app.post('/api/pedidos', async (req, res) => {
     const { usuarioId, usuario_id, items, total } = req.body;
     const idUsuario = usuarioId || usuario_id;
+
+    if (!idUsuario || !items || !Array.isArray(items) || items.length === 0) {
+        return res.status(400).json({ success: false, message: 'Datos de pedido incompletos o sin artículos' });
+    }
+
     const client = await pool.connect();
 
     try {
         await client.query('BEGIN');
 
-        // 1. Consultar saldo actual del usuario en base de datos
+        // 1. Consultar saldo actual del usuario en la BD
         const resUser = await client.query('SELECT saldo FROM usuarios WHERE id = $1', [idUsuario]);
         if (resUser.rows.length === 0) {
             await client.query('ROLLBACK');
@@ -172,7 +192,7 @@ app.post('/api/pedidos', async (req, res) => {
         }
 
         const saldoActual = parseFloat(resUser.rows[0].saldo || 0);
-        const totalCompra = parseFloat(total);
+        const totalCompra = parseFloat(total) || 0.0;
 
         // 2. Verificar saldo disponible
         if (saldoActual < totalCompra) {
@@ -193,13 +213,13 @@ app.post('/api/pedidos', async (req, res) => {
         const queryItem = 'INSERT INTO detalle_pedidos (pedido_id, producto_id, cantidad, precio_unitario) VALUES ($1, $2, $3, $4)';
         for (const item of items) {
             const prodId = item.productoId || item.producto_id;
-            const precUnit = item.precioUnitario || item.precio_unitario;
-            await client.query(queryItem, [pedidoId, prodId, item.cantidad, precUnit]);
+            const precUnit = parseFloat(item.precioUnitario || item.precio_unitario) || 0.0;
+            const cant = parseInt(item.cantidad, 10) || 1;
+            await client.query(queryItem, [pedidoId, prodId, cant, precUnit]);
         }
 
         await client.query('COMMIT');
 
-        // Devolver respuesta exitosa con el nuevo saldo oficial
         res.json({ 
             success: true, 
             message: 'Pedido realizado con éxito', 
@@ -235,7 +255,7 @@ app.get('/api/pedidos/usuario/:usuarioId', async (req, res) => {
         res.json(result.rows);
     } catch (err) {
         console.error('Error en GET /api/pedidos/usuario:', err);
-        res.status(500).json({ message: err.message });
+        res.status(500).json({ success: false, message: err.message });
     }
 });
 
@@ -257,7 +277,7 @@ app.get('/api/pedidos', async (req, res) => {
         res.json(result.rows);
     } catch (err) {
         console.error('Error en GET /api/pedidos:', err);
-        res.status(500).json({ message: err.message });
+        res.status(500).json({ success: false, message: err.message });
     }
 });
 
@@ -279,7 +299,7 @@ app.get('/api/pedidos/:id', async (req, res) => {
         const resultPedido = await pool.query(queryPedido, [id]);
 
         if (resultPedido.rows.length === 0) {
-            return res.status(404).json({ message: 'Pedido no encontrado' });
+            return res.status(404).json({ success: false, message: 'Pedido no encontrado' });
         }
 
         const queryItems = `
@@ -299,7 +319,7 @@ app.get('/api/pedidos/:id', async (req, res) => {
         res.json(pedido);
     } catch (err) {
         console.error('Error en GET /api/pedidos/:id:', err);
-        res.status(500).json({ message: err.message });
+        res.status(500).json({ success: false, message: err.message });
     }
 });
 
@@ -332,7 +352,7 @@ app.get('/api/usuarios', async (req, res) => {
                 nombre, 
                 email, 
                 rol, 
-                CAST(saldo AS DOUBLE PRECISION) AS saldo,
+                CAST(COALESCE(saldo, 0) AS DOUBLE PRECISION) AS saldo,
                 foto_perfil AS "fotoPerfil",
                 TO_CHAR(fecha_registro, 'YYYY-MM-DD HH24:MI') AS "fechaRegistro"
             FROM usuarios 
@@ -342,7 +362,7 @@ app.get('/api/usuarios', async (req, res) => {
         res.json(result.rows);
     } catch (err) {
         console.error('Error en GET /api/usuarios:', err);
-        res.status(500).json({ message: err.message });
+        res.status(500).json({ success: false, message: err.message });
     }
 });
 
@@ -355,19 +375,19 @@ app.get('/api/usuarios/:id', async (req, res) => {
                 nombre, 
                 email, 
                 rol, 
-                CAST(saldo AS DOUBLE PRECISION) AS saldo,
+                CAST(COALESCE(saldo, 0) AS DOUBLE PRECISION) AS saldo,
                 foto_perfil AS "fotoPerfil"
             FROM usuarios 
             WHERE id = $1
         `;
         const result = await pool.query(query, [id]);
         if (result.rows.length === 0) {
-            return res.status(404).json({ message: 'Usuario no encontrado' });
+            return res.status(404).json({ success: false, message: 'Usuario no encontrado' });
         }
         res.json(result.rows[0]);
     } catch (err) {
         console.error('Error en GET /api/usuarios/:id:', err);
-        res.status(500).json({ message: err.message });
+        res.status(500).json({ success: false, message: err.message });
     }
 });
 
@@ -415,18 +435,19 @@ app.put('/api/usuarios/admin/:id', async (req, res) => {
     const { id } = req.params;
     const { nombre, email, rol, fotoPerfil, foto_perfil, nuevaPassword, saldo } = req.body;
     const foto = fotoPerfil !== undefined ? fotoPerfil : foto_perfil;
+    const saldoNum = (saldo !== undefined && saldo !== null && saldo !== '' && !isNaN(parseFloat(saldo))) ? parseFloat(saldo) : null;
 
     try {
         if (nuevaPassword && nuevaPassword.trim() !== '') {
             const hashedPassword = await bcrypt.hash(nuevaPassword, 10);
             await pool.query(
                 'UPDATE usuarios SET nombre = $1, email = $2, rol = $3, foto_perfil = $4, password = $5, saldo = COALESCE($6, saldo) WHERE id = $7',
-                [nombre, email, rol, foto, hashedPassword, saldo, id]
+                [nombre, email, rol, foto, hashedPassword, saldoNum, id]
             );
         } else {
             await pool.query(
                 'UPDATE usuarios SET nombre = $1, email = $2, rol = $3, foto_perfil = $4, saldo = COALESCE($5, saldo) WHERE id = $6',
-                [nombre, email, rol, foto, saldo, id]
+                [nombre, email, rol, foto, saldoNum, id]
             );
         }
         res.json({ success: true, message: 'Usuario actualizado correctamente' });
@@ -448,25 +469,25 @@ app.delete('/api/usuarios/:id', async (req, res) => {
 });
 
 // ==========================================
-// 5. GESTIÓN DE SALDO Y TRANSACCIONES (NUEVO)
+// 5. GESTIÓN DE SALDO Y TRANSACCIONES
 // ==========================================
 
 app.get('/api/usuarios/:id/saldo', async (req, res) => {
     const { id } = req.params;
     try {
         const query = `
-            SELECT id, nombre, email, rol, CAST(saldo AS DOUBLE PRECISION) AS saldo 
+            SELECT id, nombre, email, rol, CAST(COALESCE(saldo, 0) AS DOUBLE PRECISION) AS saldo 
             FROM usuarios 
             WHERE id = $1
         `;
         const result = await pool.query(query, [id]);
         if (result.rows.length === 0) {
-            return res.status(404).json({ message: 'Usuario no encontrado' });
+            return res.status(404).json({ success: false, message: 'Usuario no encontrado' });
         }
         res.json(result.rows[0]);
     } catch (err) {
         console.error('Error en GET /api/usuarios/:id/saldo:', err);
-        res.status(500).json({ message: err.message });
+        res.status(500).json({ success: false, message: err.message });
     }
 });
 
